@@ -1,0 +1,97 @@
+#!/usr/bin/bpftrace -I /usr/src/kernels/$(uname -r)/include/
+#include <linux/types.h>
+#include <linux/pid_namespace.h>
+
+BEGIN
+{
+	printf("usage: caba.bt [pidns_inum]\n");
+	@pidns_inum = (uint32)$1;
+	if (@pidns_inum != 0) {
+		printf("Tracing process tree events in pidns %u and descendants. Hit Ctrl-C to end.\n",
+		       @pidns_inum);
+	} else {
+		printf("Tracing global process tree events. Hit Ctrl-C to end.\n");
+	}
+}
+
+kprobe:release_task
+{
+	$task = (struct task_struct *)arg0;
+	$pid = $task->thread_pid;
+	$vpid = $pid->numbers[0].nr;
+
+	/* Filter events by pidns */
+	if (@pidns_inum != 0) {
+		/* Trick to access $pid->numbers[$i] where $i > 0 in the array of size 1 */
+		$upids = ((uint8 *)$pid) + sizeof(struct pid) - sizeof(struct upid);
+
+		$i = (uint32)0;
+		while ($i < 40) {
+			if ($i > $pid->level) {
+				break;
+			}
+			/* $upid = $pid->numbers[$i] */
+			$upid = (struct upid *)($upids + $i * sizeof(struct upid));
+
+			if ($upid->ns->ns.inum == @pidns_inum) {
+				break;
+			}
+			$i++;
+		}
+
+		if ($upid->ns->ns.inum != @pidns_inum) {
+			return;
+		}
+	}
+
+	printf("%s: %d\n", probe, $vpid);
+}
+
+kprobe:sched_post_fork
+{
+	$task = (struct task_struct *)arg0;
+	$pid = $task->thread_pid;
+	$vpid = $pid->numbers[0].nr;
+
+	/* Filter events by pidns */
+	if (@pidns_inum != 0) {
+		/* Trick to access $pid->numbers[$i] where $i > 0 in the array of size 1 */
+		$upids = ((uint8 *)$pid) + sizeof(struct pid) - sizeof(struct upid);
+
+		$i = (uint32)0;
+		while ($i < 40) {
+			if ($i > $pid->level) {
+				break;
+			}
+			/* $upid = $pid->numbers[$i] */
+			$upid = (struct upid *)($upids + $i * sizeof(struct upid));
+
+			if ($upid->ns->ns.inum == @pidns_inum) {
+				break;
+			}
+			$i++;
+		}
+
+		if ($upid->ns->ns.inum != @pidns_inum) {
+			return;
+		}
+	}
+
+	if ($task->exit_signal == -1) {
+		/* Exception for threads where caba is not current */
+		/* Should be: $caba = $task->real_parent; but pointing to group_leader is easier */
+		$caba = $task->group_leader;
+	} else {
+		/* Even for CLONE_PARENT caba is current */
+		$caba = curtask;
+	}
+	$caba_pid = $caba->thread_pid;
+	$caba_vpid = $caba_pid->numbers[0].nr;
+
+	printf("%s: %d %d\n", probe, $vpid, $caba_vpid);
+}
+
+END
+{
+	printf("Finished tracing global process tree events.\n")
+}
